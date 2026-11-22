@@ -1,0 +1,25 @@
+services:
+  sceptre:
+    image: cloudreach/sceptre:3.2.0
+    working_dir: /project
+    volumes:
+      - "./infrastructure:/project"
+    environment:
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+      - AWS_SESSION_TOKEN
+      - AWS_PROFILE
+      - BUILDKITE_BRANCH
+      - BUILDKITE_BUILD_NUMBER
+      - BUILDKITE_BUILD_URL
+      - BUILDKITE_COMMIT
+      - BUILDKITE_PIPELINE_SLUG
+      - BUILDKITE_REPO
+
+  yamllint:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile-yamllint
+    working_dir: /workdir
+    volumes:
+      - "./:/workdir"

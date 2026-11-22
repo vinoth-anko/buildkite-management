@@ -1,0 +1,495 @@
+# This template builds on Buildkite's Elastic CI for AWS template
+# and adds some enhancements such as removing the retain bucket setting.
+#
+# Most of the parameters are identical to Buildkite's versioned templates
+# and subsequently passed directly into the Buildkite child stack which is
+# provisioned from their versioned S3 URLs available below:
+#   https://github.com/buildkite/elastic-ci-stack-for-aws/releases
+#
+#  To update to a new version, bump the ReleaseVersion parameter.
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Buildkite Agent Stack"
+Metadata:
+  cfn-lint:
+    config:
+      ignore_checks:
+        - W2001
+
+Parameters:
+  ReleaseVersion:
+    # https://github.com/buildkite/elastic-ci-stack-for-aws/releases
+    Description: Buildkite Elastic CI Stack Release Version
+    Type: String
+    # renovate: datasource=github-releases depName=buildkite/elastic-ci-stack-for-aws
+    Default: v6.40.10
+    AllowedPattern: 'v[0-9]+\.[0-9]+\.[0-9]+$'
+
+  AgentCheckQueryString:
+    Type: String
+    Description: "Enter a query string to enforce agent usage by specific variables. i.e. '?CI=true', to only use an agent when the build env CI equals true."
+    Default: ""
+
+  AgentsPerInstance:
+    Description: Number of Buildkite agents to run on each instance
+    Type: Number
+    Default: 4
+
+  AssociatePublicIpAddress:
+    Type: String
+    Description: Associate instances with public IP addresses
+    AllowedValues:
+      - "true"
+      - "false"
+    Default: "false"
+
+  BuildkiteAgentToken:
+    Description: Optional - Buildkite agent registration token.
+    Type: String
+    NoEcho: true
+    Default: ""
+
+  BuildkiteAgentTags:
+    Description: Additional tags separated by commas to provide to the agent. E.g os=linux,llamas=always
+    Type: String{% if sceptre_user_data.environment_name is defined %}
+    Default: "owner=Platform Engineering,git-repo=aws-org-and-account-baseline,code-branch=main,data-sensitivity=None,public-facing=No,business-criticality=Tier 2,vendor-managed=No,env={{ sceptre_user_data.environment_name }}"
+    {% else %}
+    Default: "owner=Platform Engineering,git-repo=aws-org-and-account-baseline,code-branch=main,data-sensitivity=None,public-facing=No,business-criticality=Tier 2,vendor-managed=No"
+{% endif %}
+  InstanceRolePermissionsBoundaryARN:
+    Description: Optional - Permissions boundary policy ARN to attach to IAM Role
+    Type: String
+    Default: ''
+
+  BuildkiteAgentTokenParameterStorePath:
+    Description: Optional - AWS SSM path to the Buildkite agent registration token (this takes precedence over BuildkiteAgentToken)
+    Type: String
+    Default: ""
+
+  BootstrapScriptUrl:
+    Description: Optional - HTTPS or S3 URL to run on each instance during boot.  This value must be empty if AgentCheckQueryString is specified
+    Type: String
+    Default: ""
+
+  BuildkiteQueue:
+    Description: Queue name that agents will use, targeted in pipeline steps using "queue={value}"
+    Type: String
+    Default: default
+    MinLength: 1
+
+  BuildkiteAgentRelease:
+    Description: Buildkite Agent release channel supplied to the Elastic CI Stack
+    Type: String
+    Default: stable
+
+  CommonSecretBucket:
+    Description: Name of the existing S3 bucket containing pipeline secrets (Created if left blank)
+    Type: String
+    Default: "cgws-buildkite-agents-secrets"
+
+  CostAllocationTagName:
+    Type: String
+    Description: The name of the Cost Allocation Tag used for billing purposes
+    Default: "costcode"
+
+  CostAllocationTagValue:
+    Type: String
+    Description: The value of the Cost Allocation Tag used for billing purposes
+    Default: "Platform Engineering"
+
+  EnableCostAllocationTags:
+    Type: String
+    Description: Enables AWS Cost Allocation tags for all resources in the stack. See https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/cost-alloc-tags.html
+    AllowedValues:
+      - "true"
+      - "false"
+    Default: "true"
+
+  EnableDockerExperimental:
+    Type: String
+    Description: Enables Docker experimental features
+    AllowedValues:
+      - "true"
+      - "false"
+    Default: "true"
+
+  EnableDockerUserNamespaceRemap:
+    Type: String
+    Description: Enables Docker user namespace remapping so docker runs as buildkite-agent
+    AllowedValues:
+      - "true"
+      - "false"
+    Default: "true"
+
+  InstanceRoleName:
+    Description: IAM Role Name - Need to override because it's limited to 64 characters
+    Type: String
+    MaxLength: 64
+
+  ManagedPolicyARNs:
+    Type: CommaDelimitedList
+    Description: Optional - Comma separated list of managed IAM policy ARNs to attach to the instance role
+    Default: ""
+
+  InstanceTypes:
+    Type: String
+    Description: Comma-separated list with 1-4 instance types. The order is a prioritized preference for launching OnDemand instances, and a non-prioritized list of types to consider for Spot Instances (where used).
+    Default: "t3.large"
+
+  MinSize:
+    Description: Minimum number of instances
+    Type: String
+    Default: "0"
+
+  MaxSize:
+    Description: Maximum number of instances
+    Type: String
+    Default: "10"
+
+  ScaleOutFactor:
+    Description: A decimal factor to apply to scale out changes to speed up or slow down scale-out
+    Type: Number
+    Default: 1.0
+
+  ScaleInIdlePeriod:
+    Description: Number of seconds an agent must be idle before terminating
+    Type: Number
+    Default: 180
+
+  SecurityGroupIds:
+    Type: String
+    Description: Optional - Comma separated list of security group ids to assign to instances
+    Default: ""
+
+  Subnets:
+    Type: CommaDelimitedList
+    Description: Optional - Comma separated list of two existing VPC subnet ids where EC2 instances will run. Required if setting VpcId.
+    Default: ""
+
+  BuildkiteAgentEnableGitMirrors:
+    Type: String
+    Description: Enables the git-mirrors experiment in the agent
+    Default: "false"
+
+  VpcId:
+    Type: String
+    Description: Optional - Id of an existing VPC to launch instances into. Leave blank to have a new VPC and Flow Logs created
+    Default: ""
+
+  # Note that this is only relevant if we have a base capacity > 0.
+  OnDemandPercentage:
+    Type: String
+    Description: Percentage of total instances that should launch as OnDemand. Default is 100% OnDemand - reduce this to use some Spot Instances when they're available and cheaper than the OnDemand price. A value of 70 means 70% OnDemand and 30% Spot Instances.
+    Default: 0
+
+  BuildkiteTerminateInstanceAfterJob:
+    Description: Set to "true" to terminate the instance after a job has completed.
+    Type: String
+    AllowedValues:
+      - "true"
+      - "false"
+    Default: "false"
+
+  EnableInstanceStorage:
+    Type: String
+    Description: Mount available NVMe Instance Storage at /mnt/ephemeral
+    AllowedValues:
+      - "true"
+      - "false"
+    Default: "false"
+
+  MountTmpfsAtTmp:
+    Type: String
+    Description: Controls the filesystem mounted at /tmp. By default, /tmp is a tmpfs (memory-backed filesystem). Disabling this causes /tmp to be stored in the root filesystem.
+    AllowedValues:
+      - "true"
+      - "false"
+    Default: "true"
+
+Conditions:
+  CreateVpc: !Equals [!Ref VpcId, '']
+  DeployCustomAgentChecksLambda: !And
+    - !Equals [!Ref BootstrapScriptUrl, '']
+    - !Not
+      - !Equals [!Ref AgentCheckQueryString, '']
+  ExistingVpc: !Not [!Condition CreateVpc]
+
+
+Resources:
+  ArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W51
+            reason: Ignore the fact we don't have a bucket policy, because we're using account wide block and config rules
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteNonCurrentandAbortedUpload
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 7
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      LoggingConfiguration:
+        DestinationBucketName: !Ref AccessLogsBucket
+        LogFilePrefix: buildkite-artifacts
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  AccessLogsBucket:
+    Type: 'AWS::S3::Bucket'
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W35
+            reason: Ignore not enabling logging for a logging bucket
+          - id: W51
+            reason: Ignore the fact we don't have a bucket policy, because we're using account wide block and config rules
+    Properties:
+      AccessControl: LogDeliveryWrite
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteAbortedUpload
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+
+  AgentSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    # Only create the security group, when we're passing in an external VpcId.
+    # Otherwise we'd end up with a dependency loop on the nested stack.
+    # This security group is mostly needed to allow egress access, because at
+    # time of writing, the only SG attached was for the VPC endpoint, which doesn't
+    # provide egress access.
+    Condition: ExistingVpc
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: F1000
+            reason: Accept risk of allowing all outbound traffic due to lack of egress rule specification.
+    Properties:
+      GroupDescription: !Sub '${AWS::StackName} Agent security group'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName} SG'
+      VpcId: !Ref VpcId
+
+  # Include the Buildkite Agent Stack
+  # but pass in our own Artifacts and Secrets bucket
+  # so we can manage the retain attribute
+  BuildkiteAgent:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      Parameters:
+        AssociatePublicIpAddress: !Ref AssociatePublicIpAddress
+        AgentsPerInstance: !Ref AgentsPerInstance
+        ArtifactsBucket: !Ref ArtifactsBucket
+        BootstrapScriptUrl: !If
+          - DeployCustomAgentChecksLambda
+          - !Sub https://${CustomAgentCheckLambdaApiGateway}.execute-api.${AWS::Region}.amazonaws.com/live${AgentCheckQueryString}
+          - !Ref BootstrapScriptUrl
+        BuildkiteAgentToken: !Ref BuildkiteAgentToken
+        BuildkiteAgentTokenParameterStorePath: !Ref BuildkiteAgentTokenParameterStorePath
+        BuildkiteAgentRelease: !Ref BuildkiteAgentRelease
+        BuildkiteQueue: !Ref BuildkiteQueue
+        BuildkiteTerminateInstanceAfterJob: !Ref BuildkiteTerminateInstanceAfterJob
+        InstanceTypes: !Ref InstanceTypes
+        BuildkiteAgentTags: !Ref BuildkiteAgentTags
+        CostAllocationTagName: !Ref CostAllocationTagName
+        CostAllocationTagValue: !Ref CostAllocationTagValue
+        EnableCostAllocationTags: !Ref EnableCostAllocationTags
+        EnableDockerExperimental: !Ref EnableDockerExperimental
+        EnableDockerUserNamespaceRemap: !Ref EnableDockerUserNamespaceRemap
+        InstanceRoleName: !Ref InstanceRoleName
+        IMDSv2Tokens: "required"
+        ManagedPolicyARNs: !Join
+          - ','
+          - !Ref ManagedPolicyARNs
+        MinSize: !Ref MinSize
+        MaxSize: !Ref MaxSize
+        OnDemandPercentage: !Ref OnDemandPercentage
+        ScaleOutFactor: !Ref ScaleOutFactor
+        ScaleInIdlePeriod: !Ref ScaleInIdlePeriod
+        SecretsBucket: !Ref CommonSecretBucket
+        SecurityGroupIds: !If
+          - ExistingVpc
+          - !Sub '${AgentSecurityGroup},${SecurityGroupIds}'
+          - !Ref SecurityGroupIds
+        Subnets: !Join
+          - ','
+          - !Ref Subnets
+        VpcId: !Ref VpcId
+        BuildkiteAgentEnableGitMirrors: !Ref BuildkiteAgentEnableGitMirrors
+        EnableInstanceStorage: !Ref EnableInstanceStorage
+        MountTmpfsAtTmp: !Ref MountTmpfsAtTmp
+      TemplateURL: !Sub 'https://s3.amazonaws.com/buildkite-aws-stack/${ReleaseVersion}/aws-stack.yml'
+
+  CustomAgentCheckLambda:
+    Type: AWS::Lambda::Function
+    Condition: DeployCustomAgentChecksLambda
+    Properties:
+      Runtime: nodejs16.x
+      Role: !GetAtt CustomAgentCheckLambdaRole.Arn
+      Handler: index.handler
+      Code:
+        ZipFile: |
+          /*
+           * This Lambda function helps restrict Buildkite agent
+           * usage by taking a number of arguments and returning
+           * a Bootstrap script that checks variables based on
+           * passed values.
+           *
+           * i.e. ?FOO=bar      - expects the FOO variable is set to bar
+           *      ?FOO=bar,bar2 - expects the FOO variable is set to bar or bar2
+           *      ?A=1&B=2      - expects the A variable is set to 1 and the B variable is set to 2
+           */
+
+          exports.handler = async (event) => {
+              // Backup the old environment hook file, and push a new shebang in preparation for our agent checks
+              let header = `#!/bin/bash
+          ls /etc/buildkite-agent/hooks/environment.bak &>/dev/null || cp /etc/buildkite-agent/hooks/environment /etc/buildkite-agent/hooks/environment.bak
+          cat << 'EOF' > /etc/buildkite-agent/hooks/environment.new
+          #!/bin/bash
+          set -eu
+          echo -e "Agent restrictions are active - Checking pipeline eligibility...\n"
+          `
+              // Each passed in query string key ends up as a separate bash_tests string entry.
+              let bash_tests = '';
+
+              for([key, value] of Object.entries(event["queryStringParameters"])) {
+                let multiple_value_checks = [];
+                var value_csv = value.split(",");
+                value_csv.forEach(function(val){
+                  multiple_value_checks.push(`"\${${key}}" == "${val}"`)
+                });
+                var error_string = (multiple_value_checks.length > 1) ? "expected one of":"expected";
+                bash_tests += `[[ ` + multiple_value_checks.join(" || ") + ` ]] || (echo "Error! Invalid value for '${key}', ${error_string} '${value}'"; exit 1)\n`
+              }
+
+              let footer = `EOF
+          cat /etc/buildkite-agent/hooks/environment.new /etc/buildkite-agent/hooks/environment.bak > /etc/buildkite-agent/hooks/environment
+          `
+              const response = {statusCode: 200, body: header + bash_tests + footer, headers: {"content-type": "text/plain"}};
+              return response;
+
+          };
+      Description: This Lambda facilitates strict pipeline checking to protect Buildkite agents
+      TracingConfig:
+        Mode: Active
+
+  CustomAgentCheckLambdaRole:
+    Type: AWS::IAM::Role
+    Condition: DeployCustomAgentChecksLambda
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: "Ignore * usage for WriteCloudwatchMetrics policy usage of cloudwatch:PutMetricData"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: WriteCloudwatchMetrics
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+
+  CustomAgentCheckLambdaApiGateway:
+    Condition: DeployCustomAgentChecksLambda
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Description: Example API Gateway
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Name: !Sub '${AWS::StackName}-ApiGateway'
+
+  CustomAgentCheckLambdaApiGatewayRootMethod:
+    Condition: DeployCustomAgentChecksLambda
+    Type: AWS::ApiGateway::Method
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W59
+            reason: Ignore this check, because it seems like NONE should be valid for GET, not just options
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: GET
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${CustomAgentCheckLambda.Arn}/invocations
+      ResourceId: !GetAtt CustomAgentCheckLambdaApiGateway.RootResourceId
+      RestApiId: !Ref CustomAgentCheckLambdaApiGateway
+
+  CustomAgentCheckLambdaApiGatewayDeployment:
+    Condition: DeployCustomAgentChecksLambda
+    Type: AWS::ApiGateway::Deployment
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W68
+            reason: Including a UsagePlan for this implementation seems overkill
+          - id: W45
+            reason: Ignore not supplying an AccessLogSetting - We'll know pretty quickly if this is broken
+    DependsOn:
+      - CustomAgentCheckLambdaApiGatewayRootMethod
+    Properties:
+      RestApiId: !Ref CustomAgentCheckLambdaApiGateway
+      StageName: live
+
+  CustomAgentCheckLambdaApiGatewayInvoke:
+    Condition: DeployCustomAgentChecksLambda
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt CustomAgentCheckLambda.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${CustomAgentCheckLambdaApiGateway}/live/GET/
+
+Outputs:
+  CustomAgentCheckLambdaApiGatewayInvokeURL:
+    Condition: DeployCustomAgentChecksLambda
+    Value: !Sub https://${CustomAgentCheckLambdaApiGateway}.execute-api.${AWS::Region}.amazonaws.com/live
+  BuildkiteVpcId:
+    Condition: CreateVpc
+    Value:
+      Fn::GetAtt:
+        - BuildkiteAgent
+        - Outputs.VpcId

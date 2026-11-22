@@ -1,0 +1,36 @@
+---
+template_path: buildkite/Agent.yaml.j2
+parameters:
+  ReleaseVersion: v7.11.0
+  BuildkiteAgentRelease: stable
+  BuildkiteAgentTokenParameterStorePath: /buildkite/agent_tokens/aws/kmart-buildkite-default
+  InstanceRoleName: default-buildkite-agent-v7-pilot
+  BuildkiteQueue: default-v7-canary
+  BootstrapScriptUrl: s3://cgws-buildkite-bootstrap/default-agent.sh
+  ManagedPolicyARNs:
+    - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+    - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
+    - !stack_output_external infrastructure-buildkite-buildkite-docker-agent-policy::AccessPolicyArn
+  MaxSize: "1"
+  MinSize: "0"
+  SecurityGroupIds:
+    - !stack_output_external infrastructure-buildkite-vpc::SecurityGroupCIManagementClient
+  Subnets: !stack_output_external infrastructure-buildkite-vpc::PrivateSubnetIds
+  VpcId: !stack_output_external infrastructure-buildkite-vpc::VpcId
+  ScaleInIdlePeriod: "1800"
+  InstanceTypes: c6id.2xlarge,c5d.2xlarge,c5ad.2xlarge
+  EnableInstanceStorage: "true"
+  MountTmpfsAtTmp: "false"
+
+sceptre_user_data:
+  environment_name: buildkite
+
+stack_tags:
+  owner: "Platform Engineering"
+  git-repo: buildkite-agent-v7-deployment
+  code-branch: main
+  data-sensitivity: "None"
+  public-facing: "No"
+  business-criticality: "Tier 2"
+  vendor-managed: "No"
+  env: buildkite

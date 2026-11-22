@@ -1,0 +1,28 @@
+env:
+  MANAGEMENT_ACCOUNT_ID: "773893442034"
+
+steps:
+  - label: ":yaml: Lint deployment configuration"
+    command: >-
+      docker compose run --rm yamllint
+      .buildkite/pipeline.yml
+      infrastructure/config/config.yaml
+      infrastructure/config/buildkite/config.yaml
+      infrastructure/config/buildkite/buildkite-agent-v7-pilot.yaml
+    agents:
+      - "queue=default"
+    timeout_in_minutes: 10
+
+  - wait
+
+  - label: ":aws: Deploy v7 pilot stack"
+    command: bash .buildkite/deploy-v7-pilot.sh
+    plugins:
+      - cultureamp/aws-assume-role#v0.2.0:
+          role: "arn:aws:iam::${MANAGEMENT_ACCOUNT_ID}:role/AllowBuildKiteAssumeRoleOtherAccounts"
+    agents:
+      - "queue=core-infrastructure"
+    branches: "main"
+    concurrency: 1
+    concurrency_group: "buildkite-agent-v7-pilot"
+    timeout_in_minutes: 30

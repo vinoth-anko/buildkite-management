@@ -1,0 +1,2 @@
+iam_role: arn:aws:iam::817092971396:role/OrganizationAccountAccessRole
+region: us-east-1
